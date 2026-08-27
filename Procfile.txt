@@ -1,0 +1,397 @@
+import logging
+import sqlite3
+import random
+import string
+import asyncio
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
+    MessageHandler, filters, ContextTypes, ConversationHandler
+)
+
+TOKEN = "8883300778:AAFasb0dY__R9d1NW0OX2CwYWAEVXAoujZA"
+ADMIN_ID = 6189261314
+
+(
+    WAITING_FOR_RECEIPT,
+    WAITING_FOR_ADD_BAL_USER,
+    WAITING_FOR_ADD_BAL_AMOUNT,
+    WAITING_FOR_BROADCAST_MSG,
+    WAITING_FOR_NEW_PASSWORD,
+    WAITING_FOR_SUPPORT_MSG
+) = range(6)
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+
+def get_db():
+    conn = sqlite3.connect("panel_ultimate.db", check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, balance INTEGER DEFAULT 0)")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS panels (
+                panel_id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                user_id INTEGER, 
+                panel_type TEXT, 
+                username TEXT, 
+                password TEXT, 
+                total_gb INTEGER, 
+                used_gb INTEGER DEFAULT 0, 
+                user_count INTEGER DEFAULT 0, 
+                status TEXT DEFAULT 'فعال'
+            )
+        """)
+        conn.commit()
+
+def get_user(user_id):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        if not row:
+            cursor.execute("INSERT INTO users (user_id, balance) VALUES (?, 0)", (user_id,))
+            conn.commit()
+            return 0
+        return row['balance']
+
+def update_balance(user_id, amount):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+        conn.commit()
+
+def add_panel(user_id, panel_type, username, password, total_gb):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO panels (user_id, panel_type, username, password, total_gb) VALUES (?, ?, ?, ?, ?)", 
+                       (user_id, panel_type, username, password, total_gb))
+        conn.commit()
+
+def get_user_panels(user_id):
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT panel_id, panel_type, username, password, total_gb, used_gb, user_count FROM panels WHERE user_id = ?", (user_id,))
+        return cursor.fetchall()
+
+def get_all_users():
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id FROM users")
+        return [r['user_id'] for r in cursor.fetchall()]
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = user.id
+    bal = get_user(user_id)
+    
+    keyboard = [
+        [InlineKeyboardButton("⚡ خرید پنل اختصاصی", callback_data="buy_panel_menu")],
+        [InlineKeyboardButton("📦 پنل‌های من", callback_data="my_panels")],
+        [InlineKeyboardButton("💳 افزایش موجودی", callback_data="charge_menu"), InlineKeyboardButton("👤 پروفایل", callback_data="profile")],
+        [InlineKeyboardButton("📩 پشتیبانی", callback_data="support_ticket"), InlineKeyboardButton("📖 قوانین", callback_data="rules")]
+    ]
+    if user_id == ADMIN_ID:
+        keyboard.append([InlineKeyboardButton("⚙️ مدیریت ارشد", callback_data="admin_panel")])
+        
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    welcome_text = f"به سامانه ارائه پنل‌های اختصاصی خوش آمدید.\n\nکاربر: {user.first_name}\nشناسه: `{user_id}`\nموجودی: **{bal:,} تومان**\n\nلطفاً گزینه مورد نظر خود را انتخاب کنید:"
+    
+    if update.message:
+        await update.message.reply_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
+    elif update.callback_query:
+        await update.callback_query.edit_message_text(welcome_text, reply_markup=reply_markup, parse_mode="Markdown")
+    return ConversationHandler.END
+
+async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+
+    if query.data == "buy_panel_menu":
+        keyboard = [
+            [InlineKeyboardButton("⚡ مرزبان (Marzban)", callback_data="panel_marzban")],
+            [InlineKeyboardButton("🚀 سنایی (X-UI)", callback_data="panel_sanai")],
+            [InlineKeyboardButton("🛡️ پاسارگاد (Pasargad)", callback_data="panel_pasargad")],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")]
+        ]
+        await query.edit_message_text("نوع پنل اختصاصی خود را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+    elif query.data.startswith("panel_"):
+        panel_type = query.data.split("_")[1].upper()
+        keyboard = [
+            [InlineKeyboardButton("۵۰ گیگابایت | ۸۰,۰۰۰ تومان", callback_data=f"buyact_{panel_type}_50_80000")],
+            [InlineKeyboardButton("۱۰۰ گیگابایت | ۱۵۰,۰۰۰ تومان", callback_data=f"buyact_{panel_type}_100_150000")],
+            [InlineKeyboardButton("۵۰۰ گیگابایت | ۶۵۰,۰۰۰ تومان", callback_data=f"buyact_{panel_type}_500_650000")],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="buy_panel_menu")]
+        ]
+        await query.edit_message_text(f"پلن‌های فعال پنل {panel_type}:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+    elif query.data.startswith("buyact_"):
+        _, panel, gb, price = query.data.split("_")
+        price, gb = int(price), int(gb)
+        if get_user(user_id) < price:
+            await query.answer("موجودی کیف پول کافی نیست. لطفا حساب خود را شارژ کنید.", show_alert=True)
+            return
+            
+        update_balance(user_id, -price)
+        rand_user = f"usr_{random.randint(1000, 9999)}"
+        rand_pass = "".join(random.choices(string.ascii_letters + string.digits, k=10))
+        add_panel(user_id, panel, rand_user, rand_pass, gb)
+        
+        msg = f"✅ **سفارش شما فعال شد.**\n\nنوع پنل: {panel}\nحجم: {gb} گیگابایت\nآدرس: `https://node1.{panel.lower()}-cloud.com:8080`\nنام کاربری: `{rand_user}`\nرمز عبور: `{rand_pass}`"
+        await context.bot.send_message(chat_id=ADMIN_ID, text=f"🛒 خرید جدید:\nکاربر: `{user_id}`\nپنل: {panel} | {gb}GB")
+        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📦 پنل‌های من", callback_data="my_panels")]]), parse_mode="Markdown")
+
+    elif query.data == "charge_menu":
+        keyboard = [
+            [InlineKeyboardButton("💳 کارت به کارت", callback_data="charge_card")],
+            [InlineKeyboardButton("🌐 درگاه آنلاین", callback_data="charge_online")],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")]
+        ]
+        await query.edit_message_text("روش افزایش موجودی را انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+    elif query.data == "charge_online":
+        await query.answer("درگاه پرداخت در حال به‌روزرسانی است. از کارت به کارت استفاده کنید.", show_alert=True)
+
+    elif query.data == "my_panels":
+        panels = get_user_panels(user_id)
+        if not panels:
+            await query.edit_message_text("هیچ پنل فعالی برای شما ثبت نشده است.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")]]), parse_mode="Markdown")
+            return
+            
+        keyboard = [[InlineKeyboardButton(f"پنل {p['panel_type']} | {p['username']}", callback_data=f"manage_panel_{p['panel_id']}")] for p in panels]
+        keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")])
+        await query.edit_message_text("لیست پنل‌های فعال شما:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+    elif query.data.startswith("manage_panel_"):
+        panel_id = int(query.data.split("_")[2])
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT panel_type, username, password, total_gb, used_gb, user_count FROM panels WHERE panel_id = ? AND user_id = ?", (panel_id, user_id))
+            p = cursor.fetchone()
+        
+        if not p:
+            await query.answer("پنل یافت نشد.", show_alert=True)
+            return
+            
+        p_type, u_name, p_pass, t_gb, u_gb, u_cnt = p['panel_type'], p['username'], p['password'], p['total_gb'], p['used_gb'], p['user_count']
+        percent = int((u_gb / t_gb) * 100) if t_gb > 0 else 0
+        
+        msg = f"مدیریت پنل {p_type}\n\nلینک: `https://node1.{p_type.lower()}-cloud.com:8080`\nیوزر: `{u_name}`\nپسورد: `{p_pass}`\n\nمصرف: {u_gb}/{t_gb} GB ({percent}%)\nکاربران: {u_cnt} نفر"
+        keyboard = [
+            [InlineKeyboardButton("🔐 تغییر رمز", callback_data=f"chpass_{panel_id}"), InlineKeyboardButton("🔄 ریست اتصال", callback_data=f"reset_{panel_id}")],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="my_panels")]
+        ]
+        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+    elif query.data.startswith("reset_"):
+        await query.answer("اتصال بازنشانی شد.", show_alert=True)
+
+    elif query.data == "profile":
+        bal = get_user(user_id)
+        msg = f"پروفایل کاربری\n\nشناسه: `{user_id}`\nموجودی: **{bal:,} تومان**"
+        await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")]]), parse_mode="Markdown")
+
+    elif query.data == "admin_panel" and user_id == ADMIN_ID:
+        keyboard = [
+            [InlineKeyboardButton("➕ شارژ دستی کاربر", callback_data="admin_add_bal")],
+            [InlineKeyboardButton("📢 پیام همگانی", callback_data="admin_broadcast")],
+            [InlineKeyboardButton("📊 آمار سیستم", callback_data="admin_stats")],
+            [InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")]
+        ]
+        await query.edit_message_text("پنل مدیریت ارشد:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+    elif query.data == "admin_stats" and user_id == ADMIN_ID:
+        users = get_all_users()
+        await query.edit_message_text(f"آمار سیستم:\n\nکل کاربران: `{len(users)}` نفر", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_panel")]]), parse_mode="Markdown")
+
+    elif query.data == "rules":
+        await query.edit_message_text("قوانین استفاده:\n۱. تحویل کلیه خدمات آنی می‌باشد.\n۲. پشتیبانی به‌صورت ۲۴ ساعته فعال است.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")]]), parse_mode="Markdown")
+
+    elif query.data == "main_menu":
+        await start(update, context)
+
+async def start_charge_card(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    msg = "💳 **افزایش موجودی کارت به کارت**\n\nمبلغ مورد نظر را واریز کرده و عکس فیش را بفرستید:\n\nشماره کارت: `6037-9999-9999-9999`\nبه نام: مدیریت"
+    keyboard = [[InlineKeyboardButton("❌ انصراف", callback_data="charge_menu")]]
+    await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    return WAITING_FOR_RECEIPT
+
+async def receive_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if update.message.photo:
+        photo = update.message.photo[-1].file_id
+        caption = f"💳 فیش واریزی جدید\nکاربر: {user.full_name}\nآیدی: `{user.id}`"
+        await context.bot.send_photo(chat_id=ADMIN_ID, photo=photo, caption=caption, parse_mode="Markdown")
+        await update.message.reply_text("✅ فیش شما ارسال شد و پس از بررسی حساب شارژ می‌شود.")
+        return ConversationHandler.END
+    else:
+        await update.message.reply_text("❌ لطفاً تصویر فیش را بفرستید.")
+        return WAITING_FOR_RECEIPT
+
+async def start_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("📝 پیام خود را برای پشتیبانی بنویسید:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="main_menu")]]), parse_mode="Markdown")
+    return WAITING_FOR_SUPPORT_MSG
+
+async def receive_support_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    text = update.message.text
+    admin_msg = f"📩 **پیام پشتیبانی جدید**\nاز طرف: {user.full_name}\nآیدی: `{user.id}`\n\n💬 متن پیام:\n{text}\n\n*(جهت پاسخ، روی همین پیام ریپلای کنید)*"
+    await context.bot.send_message(chat_id=ADMIN_ID, text=admin_msg, parse_mode="Markdown")
+    await update.message.reply_text("✅ پیام شما به پشتیبانی منتقل شد. به زودی پاسخ برای شما ارسال می‌شود.")
+    return ConversationHandler.END
+
+async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID or not update.message.reply_to_message:
+        return
+    reply_text = update.message.reply_to_message.text or update.message.reply_to_message.caption or ""
+    if "آیدی: `" in reply_text:
+        try:
+            target_id = int(reply_text.split("آیدی: `")[1].split("`")[0])
+            ans = update.message.text
+            await context.bot.send_message(chat_id=target_id, text=f"📩 **پاسخ پشتیبانی:**\n\n{ans}", parse_mode="Markdown")
+            await update.message.reply_text("✅ پاسخ برای کاربر ارسال شد.")
+        except Exception as e:
+            await update.message.reply_text(f"❌ خطا در ارسال پاسخ: {e}")
+
+async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id != ADMIN_ID:
+        return ConversationHandler.END
+    await query.edit_message_text("📢 متن پیام همگانی را بفرستید:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="admin_panel")]]), parse_mode="Markdown")
+    return WAITING_FOR_BROADCAST_MSG
+
+async def send_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return ConversationHandler.END
+    msg_text = update.message.text
+    users = get_all_users()
+    success, failed = 0, 0
+    await update.message.reply_text("⏳ در حال ارسال پیام...")
+    for uid in users:
+        try:
+            await context.bot.send_message(chat_id=uid, text=f"📢 **اطلاعیه:**\n\n{msg_text}", parse_mode="Markdown")
+            success += 1
+            await asyncio.sleep(0.04)
+        except Exception:
+            failed += 1
+    await update.message.reply_text(f"🚀 **ارسال همگانی انجام شد.**\n\n✅ موفق: `{success}`\n❌ ناموفق: `{failed}`", parse_mode="Markdown")
+    return ConversationHandler.END
+
+async def start_add_bal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    if query.from_user.id != ADMIN_ID:
+        return ConversationHandler.END
+    await query.edit_message_text("آیدی عددی کاربر را وارد کنید:")
+    return WAITING_FOR_ADD_BAL_USER
+
+async def get_add_bal_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        target_id = int(update.message.text.strip())
+        context.user_data["target_user"] = target_id
+        await update.message.reply_text(f"مبلغ شارژ برای `{target_id}` (به تومان):")
+        return WAITING_FOR_ADD_BAL_AMOUNT
+    except ValueError:
+        await update.message.reply_text("❌ آیدی عددی نامعتبر است.")
+        return WAITING_FOR_ADD_BAL_USER
+
+async def get_add_bal_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        amount = int(update.message.text.strip())
+        target_id = context.user_data.get("target_user")
+        update_balance(target_id, amount)
+        await update.message.reply_text(f"✅ مبلغ {amount:,} تومان به حساب `{target_id}` افزوده شد.", parse_mode="Markdown")
+        try:
+            await context.bot.send_message(chat_id=target_id, text=f"🎉 **حساب شما شارژ شد.**\nمبلغ: {amount:,} تومان", parse_mode="Markdown")
+        except Exception:
+            pass
+        return ConversationHandler.END
+    except ValueError:
+        await update.message.reply_text("❌ مبلغ نامعتبر است.")
+        return WAITING_FOR_ADD_BAL_AMOUNT
+
+async def start_change_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["target_panel_id"] = int(query.data.split("_")[1])
+    await query.edit_message_text("🔐 رمز عبور جدید را وارد کنید:", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ انصراف", callback_data="my_panels")]]), parse_mode="Markdown")
+    return WAITING_FOR_NEW_PASSWORD
+
+async def save_new_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    new_pass = update.message.text.strip()
+    panel_id = context.user_data.get("target_panel_id")
+    user_id = update.effective_user.id
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE panels SET password = ? WHERE panel_id = ? AND user_id = ?", (new_pass, panel_id, user_id))
+        conn.commit()
+    await update.message.reply_text("✅ رمز عبور به‌روزرسانی شد.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📦 پنل‌های من", callback_data="my_panels")]]), parse_mode="Markdown")
+    return ConversationHandler.END
+
+if __name__ == "__main__":
+    init_db()
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    receipt_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(start_charge_card, pattern="^charge_card$")],
+        states={WAITING_FOR_RECEIPT: [MessageHandler(filters.PHOTO | filters.TEXT, receive_receipt)]},
+        fallbacks=[CallbackQueryHandler(start, pattern="^main_menu$")],
+        per_message=False
+    )
+
+    support_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(start_support, pattern="^support_ticket$")],
+        states={WAITING_FOR_SUPPORT_MSG: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_support_msg)]},
+        fallbacks=[CallbackQueryHandler(start, pattern="^main_menu$")],
+        per_message=False
+    )
+
+    add_bal_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(start_add_bal, pattern="^admin_add_bal$")],
+        states={
+            WAITING_FOR_ADD_BAL_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_add_bal_user)],
+            WAITING_FOR_ADD_BAL_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_add_bal_amount)]
+        },
+        fallbacks=[CallbackQueryHandler(start, pattern="^main_menu$")],
+        per_message=False
+    )
+
+    broadcast_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(start_broadcast, pattern="^admin_broadcast$")],
+        states={WAITING_FOR_BROADCAST_MSG: [MessageHandler(filters.TEXT & ~filters.COMMAND, send_broadcast)]},
+        fallbacks=[CallbackQueryHandler(start, pattern="^main_menu$")],
+        per_message=False
+    )
+
+    chpass_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(start_change_password, pattern="^chpass_")],
+        states={WAITING_FOR_NEW_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_new_password)]},
+        fallbacks=[CallbackQueryHandler(start, pattern="^main_menu$")],
+        per_message=False
+    )
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(receipt_handler)
+    app.add_handler(support_handler)
+    app.add_handler(add_bal_handler)
+    app.add_handler(broadcast_handler)
+    app.add_handler(chpass_handler)
+    
+    app.add_handler(MessageHandler(filters.REPLY & filters.User(ADMIN_ID), handle_admin_reply))
+    app.add_handler(CallbackQueryHandler(handle_callbacks))
+
+    print("🚀 ربات با موفقیت فعال شد.")
+    app.run_polling()
